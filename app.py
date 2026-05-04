@@ -33,12 +33,12 @@ st.set_page_config(
 
 st.title("🗺️ Study Area Map Generator")
 st.caption(
-    "Create publication-style study area maps with India inset, state/district inset, main catchment map, DEM, north arrow, scale bar, grid and legend."
+    "Generate publication-style study area maps with India inset, state/district inset, main study area map, DEM, north arrow, scale bar and legends."
 )
 
 
 # ============================================================
-# GitHub boundary source
+# GitHub boundary URLs
 # ============================================================
 
 GITHUB_RAW_BASE = "https://raw.githubusercontent.com/datta07/INDIAN-SHAPEFILES/master"
@@ -48,51 +48,177 @@ INDIA_DISTRICTS_URL = f"{GITHUB_RAW_BASE}/INDIA/INDIA_DISTRICTS.geojson"
 
 
 # ============================================================
-# Column name helpers
+# Known Indian States / UTs
 # ============================================================
 
+KNOWN_STATES_UTS = [
+    "Andaman & Nicobar",
+    "Andaman and Nicobar",
+    "Andhra Pradesh",
+    "Arunachal Pradesh",
+    "Assam",
+    "Bihar",
+    "Chandigarh",
+    "Chhattisgarh",
+    "Dadra and Nagar Haveli",
+    "Daman and Diu",
+    "Delhi",
+    "Goa",
+    "Gujarat",
+    "Haryana",
+    "Himachal Pradesh",
+    "Jammu & Kashmir",
+    "Jammu and Kashmir",
+    "Jharkhand",
+    "Karnataka",
+    "Kerala",
+    "Ladakh",
+    "Lakshadweep",
+    "Madhya Pradesh",
+    "Maharashtra",
+    "Manipur",
+    "Meghalaya",
+    "Mizoram",
+    "Nagaland",
+    "NCT of Delhi",
+    "Odisha",
+    "Orissa",
+    "Puducherry",
+    "Punjab",
+    "Rajasthan",
+    "Sikkim",
+    "Tamil Nadu",
+    "Telangana",
+    "Tripura",
+    "Uttar Pradesh",
+    "Uttarakhand",
+    "West Bengal"
+]
+
+
 STATE_COLUMN_CANDIDATES = [
-    "ST_NM", "st_nm", "STATE", "State", "state",
+    "ST_NM", "st_nm",
+    "STNAME", "stname",
+    "STATE", "State", "state",
     "STATE_NAME", "State_Name", "state_name",
-    "NAME_1", "Name", "NAME", "name"
+    "statename", "StateName",
+    "ST_NAME", "st_name",
+    "NAME_1", "Name", "NAME", "name",
+    "ADM1_NAME", "adm1_name"
 ]
 
 DISTRICT_COLUMN_CANDIDATES = [
     "DISTRICT", "District", "district",
     "DIST_NAME", "Dist_Name", "dist_name",
-    "dtname", "DTNAME", "DT_NAME",
-    "NAME_2", "Name", "NAME", "name"
+    "DISTNAME", "distname",
+    "dtname", "DTNAME",
+    "DT_NAME", "dt_name",
+    "NAME_2", "Name", "NAME", "name",
+    "ADM2_NAME", "adm2_name"
 ]
 
 
+# ============================================================
+# Text and column helpers
+# ============================================================
+
 def normalize_text(x):
-    """Normalize text for matching names."""
-    return str(x).strip().upper().replace("&", "AND")
+    """
+    Normalize names for flexible matching.
+    """
+    x = str(x).strip().upper()
+    x = x.replace("&", "AND")
+    x = x.replace(".", "")
+    x = x.replace("-", " ")
+    x = " ".join(x.split())
+    return x
 
 
 def find_first_existing_column(gdf, candidates):
-    """Find the first matching column from a list of possible names."""
+    """
+    Find direct or case-insensitive matching column.
+    """
+    if gdf is None or gdf.empty:
+        return None
+
+    lower_map = {c.lower(): c for c in gdf.columns}
+
     for col in candidates:
         if col in gdf.columns:
             return col
+
+        if col.lower() in lower_map:
+            return lower_map[col.lower()]
+
     return None
 
 
-def find_best_name_column(gdf):
-    """Try to identify a suitable name column."""
-    all_candidates = STATE_COLUMN_CANDIDATES + DISTRICT_COLUMN_CANDIDATES
+def detect_state_column(gdf):
+    """
+    Detect state-name column using candidates and known state names.
+    """
+    direct = find_first_existing_column(gdf, STATE_COLUMN_CANDIDATES)
 
-    for col in all_candidates:
-        if col in gdf.columns:
-            return col
+    if direct is not None:
+        return direct
 
-    object_cols = [
-        c for c in gdf.columns
-        if c != gdf.geometry.name and gdf[c].dtype == "object"
-    ]
+    known_norm = set(normalize_text(x) for x in KNOWN_STATES_UTS)
 
-    if object_cols:
-        return object_cols[0]
+    best_col = None
+    best_score = 0
+
+    for col in gdf.columns:
+        if col == gdf.geometry.name:
+            continue
+
+        try:
+            values = (
+                gdf[col]
+                .dropna()
+                .astype(str)
+                .apply(normalize_text)
+                .unique()
+                .tolist()
+            )
+
+            score = sum(1 for v in values if v in known_norm)
+
+            if score > best_score:
+                best_score = score
+                best_col = col
+
+        except Exception:
+            continue
+
+    if best_score > 0:
+        return best_col
+
+    return None
+
+
+def detect_district_column(gdf):
+    """
+    Detect district-name column.
+    """
+    direct = find_first_existing_column(gdf, DISTRICT_COLUMN_CANDIDATES)
+
+    if direct is not None:
+        return direct
+
+    text_cols = []
+
+    for col in gdf.columns:
+        if col == gdf.geometry.name:
+            continue
+
+        try:
+            if gdf[col].dtype == "object":
+                text_cols.append(col)
+        except Exception:
+            pass
+
+    if text_cols:
+        return text_cols[0]
 
     return None
 
@@ -104,13 +230,17 @@ def find_best_name_column(gdf):
 @st.cache_data(show_spinner=True)
 def load_geojson_from_url(url):
     """
-    Download GeoJSON from GitHub raw URL and read using GeoPandas.
-    Cached to avoid repeated downloading.
+    Download GeoJSON and read as GeoDataFrame.
     """
-    response = requests.get(url, timeout=120)
+    headers = {
+        "User-Agent": "study-area-map-generator"
+    }
+
+    response = requests.get(url, headers=headers, timeout=120)
     response.raise_for_status()
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".geojson")
+
     try:
         tmp.write(response.content)
         tmp.close()
@@ -133,7 +263,9 @@ def load_geojson_from_url(url):
 
 
 def save_uploaded_file(uploaded_file, out_dir):
-    """Save uploaded file to temporary working directory."""
+    """
+    Save uploaded Streamlit file.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -150,7 +282,7 @@ def read_uploaded_vector(uploaded_file, out_dir, default_crs="EPSG:4326"):
     """
     Read uploaded vector file.
     Supports:
-    - zipped shapefile
+    - ZIP shapefile
     - GeoJSON
     - GPKG
     """
@@ -167,7 +299,7 @@ def read_uploaded_vector(uploaded_file, out_dir, default_crs="EPSG:4326"):
         shp_files = sorted(list(extract_dir.rglob("*.shp")))
 
         if not shp_files:
-            raise ValueError("No .shp file found inside the uploaded ZIP.")
+            raise ValueError("No .shp file found inside uploaded ZIP.")
 
         gdf = gpd.read_file(shp_files[0])
 
@@ -175,7 +307,7 @@ def read_uploaded_vector(uploaded_file, out_dir, default_crs="EPSG:4326"):
         gdf = gpd.read_file(saved_path)
 
     else:
-        raise ValueError("Unsupported vector format. Upload ZIP shapefile, GeoJSON or GPKG.")
+        raise ValueError("Unsupported vector format. Upload ZIP shapefile, GeoJSON, JSON or GPKG.")
 
     if gdf.empty:
         raise ValueError("Uploaded vector file is empty.")
@@ -190,7 +322,9 @@ def read_uploaded_vector(uploaded_file, out_dir, default_crs="EPSG:4326"):
 
 
 def read_uploaded_raster(uploaded_file, out_dir):
-    """Save optional uploaded DEM/GeoTIFF."""
+    """
+    Save uploaded DEM GeoTIFF.
+    """
     if uploaded_file is None:
         return None
 
@@ -198,19 +332,52 @@ def read_uploaded_raster(uploaded_file, out_dir):
 
 
 # ============================================================
-# Spatial filtering
+# Administrative boundary preparation
 # ============================================================
 
-def get_state_names(states_gdf):
-    """Extract state names for dropdown."""
-    state_col = find_first_existing_column(states_gdf, STATE_COLUMN_CANDIDATES)
+def prepare_admin_layers(states_gdf, districts_gdf):
+    """
+    Prepare state and district layers robustly.
 
-    if state_col is None:
-        state_col = find_best_name_column(states_gdf)
+    If state names cannot be detected in the states layer, the code tries
+    to dissolve the district layer by state column to create state polygons.
+    """
+    state_col = detect_state_column(states_gdf)
 
-    if state_col is None:
-        return None, []
+    if state_col is not None:
+        prepared_states = states_gdf.copy()
+        prepared_state_col = state_col
+    else:
+        district_state_col = detect_state_column(districts_gdf)
 
+        if district_state_col is None:
+            st.error("Could not detect state name column in both states and districts layers.")
+
+            st.write("Columns in INDIA_STATES.geojson:")
+            st.write(states_gdf.columns.tolist())
+
+            st.write("Columns in INDIA_DISTRICTS.geojson:")
+            st.write(districts_gdf.columns.tolist())
+
+            st.stop()
+
+        prepared_states = districts_gdf.dissolve(
+            by=district_state_col,
+            as_index=False
+        )
+
+        prepared_states = prepared_states.to_crs("EPSG:4326")
+        prepared_state_col = district_state_col
+
+    district_state_col = detect_state_column(districts_gdf)
+
+    return prepared_states, prepared_state_col, districts_gdf, district_state_col
+
+
+def get_state_names(states_gdf, state_col):
+    """
+    Extract state names for dropdown.
+    """
     names = (
         states_gdf[state_col]
         .dropna()
@@ -220,65 +387,73 @@ def get_state_names(states_gdf):
         .tolist()
     )
 
-    return state_col, names
+    return names
 
 
 def filter_state(states_gdf, state_col, selected_state):
-    """Filter India state boundary."""
-    if state_col is None:
-        return gpd.GeoDataFrame(columns=states_gdf.columns, crs=states_gdf.crs)
-
+    """
+    Select state polygon by name.
+    """
     selected_norm = normalize_text(selected_state)
+    state_series = states_gdf[state_col].astype(str).apply(normalize_text)
 
-    out = states_gdf[
-        states_gdf[state_col].astype(str).apply(normalize_text) == selected_norm
+    exact = states_gdf[state_series == selected_norm].copy()
+
+    if not exact.empty:
+        return exact
+
+    partial = states_gdf[
+        state_series.str.contains(selected_norm, na=False)
     ].copy()
 
-    if out.empty:
-        out = states_gdf[
-            states_gdf[state_col].astype(str).apply(normalize_text).str.contains(selected_norm, na=False)
-        ].copy()
+    if not partial.empty:
+        return partial
 
-    return out
+    reverse = states_gdf[
+        state_series.apply(lambda x: selected_norm in x or x in selected_norm)
+    ].copy()
+
+    return reverse
 
 
-def filter_districts_for_state(districts_gdf, selected_state_gdf, selected_state_name):
+def filter_districts_for_state(districts_gdf, district_state_col, selected_state_gdf, selected_state_name):
     """
-    Filter district layer for selected state.
-    First tries attribute-based filtering.
-    If that fails, falls back to spatial intersection.
+    Filter districts of selected state using attribute first, then spatial intersection.
     """
-    state_col = find_first_existing_column(districts_gdf, STATE_COLUMN_CANDIDATES)
-
-    if state_col is not None:
+    if district_state_col is not None:
         selected_norm = normalize_text(selected_state_name)
 
-        out = districts_gdf[
-            districts_gdf[state_col].astype(str).apply(normalize_text) == selected_norm
+        state_series = districts_gdf[district_state_col].astype(str).apply(normalize_text)
+
+        exact = districts_gdf[state_series == selected_norm].copy()
+
+        if not exact.empty:
+            return exact
+
+        partial = districts_gdf[
+            state_series.str.contains(selected_norm, na=False)
         ].copy()
 
-        if not out.empty:
-            return out
-
-        out = districts_gdf[
-            districts_gdf[state_col].astype(str).apply(normalize_text).str.contains(selected_norm, na=False)
-        ].copy()
-
-        if not out.empty:
-            return out
+        if not partial.empty:
+            return partial
 
     if selected_state_gdf is not None and not selected_state_gdf.empty:
-        state_geom = selected_state_gdf.geometry.unary_union
-        out = districts_gdf[districts_gdf.geometry.intersects(state_geom)].copy()
+        state_geom = selected_state_gdf.geometry.union_all()
 
-        if not out.empty:
-            return out
+        spatial = districts_gdf[
+            districts_gdf.geometry.intersects(state_geom)
+        ].copy()
+
+        if not spatial.empty:
+            return spatial
 
     return districts_gdf.copy()
 
 
 def filter_by_attribute(gdf, column, value):
-    """Filter any GeoDataFrame by selected attribute value."""
+    """
+    Filter GeoDataFrame by selected attribute.
+    """
     if column == "None" or value == "All":
         return gdf.copy()
 
@@ -286,11 +461,13 @@ def filter_by_attribute(gdf, column, value):
 
 
 # ============================================================
-# Cartographic helpers
+# Cartographic helper functions
 # ============================================================
 
 def padded_bounds(bounds, pad=0.08):
-    """Apply padding to bounds."""
+    """
+    Add padding to bounds.
+    """
     minx, miny, maxx, maxy = bounds
 
     dx = maxx - minx
@@ -311,22 +488,26 @@ def padded_bounds(bounds, pad=0.08):
 
 
 def set_extent(ax, gdf, pad=0.08):
-    """Set map extent based on GeoDataFrame bounds."""
+    """
+    Set map extent using GeoDataFrame.
+    """
     minx, miny, maxx, maxy = padded_bounds(gdf.total_bounds, pad=pad)
+
     ax.set_xlim(minx, maxx)
     ax.set_ylim(miny, maxy)
 
 
 def format_dms(value, is_lon=True):
-    """Format decimal degree as degree-minute-second label."""
-    hemi = ""
-
+    """
+    Decimal degree to DMS label.
+    """
     if is_lon:
         hemi = "E" if value >= 0 else "W"
     else:
         hemi = "N" if value >= 0 else "S"
 
     value = abs(float(value))
+
     degree = int(np.floor(value))
     minute_float = (value - degree) * 60
     minute = int(np.floor(minute_float))
@@ -344,12 +525,19 @@ def format_dms(value, is_lon=True):
 
 
 def apply_degree_grid(ax, fontsize=7, xbins=4, ybins=4):
-    """Apply longitude-latitude tick formatting."""
+    """
+    Add degree grid labels on all sides.
+    """
     ax.xaxis.set_major_locator(MaxNLocator(nbins=xbins))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=ybins))
 
-    ax.xaxis.set_major_formatter(FuncFormatter(lambda x, pos: format_dms(x, is_lon=True)))
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda y, pos: format_dms(y, is_lon=False)))
+    ax.xaxis.set_major_formatter(
+        FuncFormatter(lambda x, pos: format_dms(x, is_lon=True))
+    )
+
+    ax.yaxis.set_major_formatter(
+        FuncFormatter(lambda y, pos: format_dms(y, is_lon=False))
+    )
 
     ax.tick_params(
         axis="both",
@@ -373,7 +561,9 @@ def apply_degree_grid(ax, fontsize=7, xbins=4, ybins=4):
 
 
 def add_north_arrow(ax, x=0.90, y=0.78, size=0.11):
-    """Add simple north arrow with N, S, E, W labels."""
+    """
+    Add north arrow with N, S, E and W.
+    """
     ax.annotate(
         "N",
         xy=(x, y + size),
@@ -393,18 +583,44 @@ def add_north_arrow(ax, x=0.90, y=0.78, size=0.11):
         zorder=50
     )
 
-    ax.text(x, y - 0.055, "S", transform=ax.transAxes,
-            ha="center", va="center", fontsize=7, zorder=50)
+    ax.text(
+        x,
+        y - 0.055,
+        "S",
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=7,
+        zorder=50
+    )
 
-    ax.text(x - 0.065, y + 0.035, "W", transform=ax.transAxes,
-            ha="center", va="center", fontsize=7, zorder=50)
+    ax.text(
+        x - 0.065,
+        y + 0.035,
+        "W",
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=7,
+        zorder=50
+    )
 
-    ax.text(x + 0.065, y + 0.035, "E", transform=ax.transAxes,
-            ha="center", va="center", fontsize=7, zorder=50)
+    ax.text(
+        x + 0.065,
+        y + 0.035,
+        "E",
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=7,
+        zorder=50
+    )
 
 
 def km_to_degree_lon(km, latitude):
-    """Approximate km to longitude-degree conversion at given latitude."""
+    """
+    Approximate km to longitude degrees at given latitude.
+    """
     denom = 111.32 * np.cos(np.deg2rad(latitude))
 
     if abs(denom) < 1e-6:
@@ -414,36 +630,38 @@ def km_to_degree_lon(km, latitude):
 
 
 def choose_nice_scale_length(width_km):
-    """Choose cartographically nice scale-bar length."""
+    """
+    Choose a cartographically clean scale length.
+    """
     target = width_km / 5
 
     nice_values = [
-        1, 2, 5, 10, 20, 25, 50, 75, 100,
-        150, 200, 250, 500, 750, 1000, 1500,
-        2000, 2500, 3000, 3500
+        1, 2, 5,
+        10, 20, 25, 50, 75,
+        100, 150, 200, 250, 500, 750,
+        1000, 1500, 2000, 2500, 3000, 3500
     ]
 
-    for v in nice_values:
-        if v >= target:
-            return v
+    for value in nice_values:
+        if value >= target:
+            return value
 
     return 5000
 
 
 def add_scale_bar_degree(ax, location=(0.08, 0.065), segments=4, fontsize=7):
     """
-    Add approximate scale bar on maps plotted in geographic coordinates.
-    Suitable for study-area and regional maps.
+    Add approximate scale bar for geographic coordinate maps.
     """
     xlim = ax.get_xlim()
     ylim = ax.get_ylim()
 
     width_deg = xlim[1] - xlim[0]
     height_deg = ylim[1] - ylim[0]
+
     center_lat = (ylim[0] + ylim[1]) / 2
 
-    width_km = width_deg * 111.32 * np.cos(np.deg2rad(center_lat))
-    width_km = abs(width_km)
+    width_km = abs(width_deg * 111.32 * np.cos(np.deg2rad(center_lat)))
 
     length_km = choose_nice_scale_length(width_km)
     length_deg = km_to_degree_lon(length_km, center_lat)
@@ -501,14 +719,15 @@ def add_scale_bar_degree(ax, location=(0.08, 0.065), segments=4, fontsize=7):
 
 
 def add_panel_title(ax, title, fontsize=14):
-    """Add panel title inside the map frame."""
+    """
+    Add map title inside panel.
+    """
     ax.text(
         0.05,
         0.94,
         title,
         transform=ax.transAxes,
         fontsize=fontsize,
-        fontweight="normal",
         ha="left",
         va="top",
         zorder=60
@@ -516,7 +735,9 @@ def add_panel_title(ax, title, fontsize=14):
 
 
 def add_map_border(ax, linewidth=1.0):
-    """Style map border."""
+    """
+    Add black frame around map panel.
+    """
     for spine in ax.spines.values():
         spine.set_visible(True)
         spine.set_linewidth(linewidth)
@@ -524,17 +745,16 @@ def add_map_border(ax, linewidth=1.0):
 
 
 # ============================================================
-# Raster helpers
+# Raster helper functions
 # ============================================================
 
 def clip_dem_to_study_area_wgs84(raster_path, study_gdf_wgs84):
     """
-    Reproject DEM to EPSG:4326 using WarpedVRT, clip to study area,
-    and return array and plotting extent in lon-lat coordinates.
+    Reproject DEM to EPSG:4326 and clip to study area.
     """
     with rasterio.open(raster_path) as src:
         if src.crs is None:
-            raise ValueError("Uploaded raster has no CRS. Please use a georeferenced GeoTIFF.")
+            raise ValueError("Uploaded raster has no CRS. Please upload a georeferenced GeoTIFF.")
 
         with WarpedVRT(
             src,
@@ -543,7 +763,11 @@ def clip_dem_to_study_area_wgs84(raster_path, study_gdf_wgs84):
         ) as vrt:
 
             study_for_raster = study_gdf_wgs84.to_crs(vrt.crs)
-            shapes = [geom for geom in study_for_raster.geometry if geom is not None]
+
+            shapes = [
+                geom for geom in study_for_raster.geometry
+                if geom is not None and not geom.is_empty
+            ]
 
             clipped, transform = mask(
                 vrt,
@@ -560,7 +784,7 @@ def clip_dem_to_study_area_wgs84(raster_path, study_gdf_wgs84):
             arr[arr <= -9999] = np.nan
 
             if np.all(np.isnan(arr)):
-                raise ValueError("DEM clipping resulted in empty raster. Check DEM and study area overlap.")
+                raise ValueError("DEM clipping produced empty raster. Check overlap between DEM and study area.")
 
             extent = plotting_extent(arr, transform)
 
@@ -568,8 +792,13 @@ def clip_dem_to_study_area_wgs84(raster_path, study_gdf_wgs84):
 
 
 def plot_dem(ax, raster_path, study_gdf_wgs84, cmap="plasma"):
-    """Plot clipped DEM on main map."""
-    arr, extent = clip_dem_to_study_area_wgs84(raster_path, study_gdf_wgs84)
+    """
+    Plot clipped DEM.
+    """
+    arr, extent = clip_dem_to_study_area_wgs84(
+        raster_path,
+        study_gdf_wgs84
+    )
 
     vmin = np.nanmin(arr)
     vmax = np.nanmax(arr)
@@ -587,7 +816,9 @@ def plot_dem(ax, raster_path, study_gdf_wgs84, cmap="plasma"):
 
 
 def add_dem_legend(fig, ax, im, vmin, vmax):
-    """Add DEM colorbar similar to journal-style study area maps."""
+    """
+    Add DEM legend.
+    """
     cax = ax.inset_axes([0.70, 0.31, 0.055, 0.20])
 
     cbar = fig.colorbar(im, cax=cax)
@@ -609,57 +840,93 @@ def add_dem_legend(fig, ax, im, vmin, vmax):
 
 
 # ============================================================
-# Sidebar controls
+# Load administrative boundary data
 # ============================================================
 
-st.sidebar.header("1. Boundary Data")
-
 try:
-    india_states_gdf = load_geojson_from_url(INDIA_STATES_URL)
-    india_districts_gdf = load_geojson_from_url(INDIA_DISTRICTS_URL)
+    raw_states_gdf = load_geojson_from_url(INDIA_STATES_URL)
+    raw_districts_gdf = load_geojson_from_url(INDIA_DISTRICTS_URL)
+
 except Exception as e:
     st.error(f"Could not download India boundary data from GitHub: {e}")
     st.stop()
 
-state_col, state_names = get_state_names(india_states_gdf)
+
+states_gdf, state_col, districts_gdf, district_state_col = prepare_admin_layers(
+    raw_states_gdf,
+    raw_districts_gdf
+)
+
+state_names = get_state_names(states_gdf, state_col)
 
 if not state_names:
-    st.error("Could not identify state names in India state boundary file.")
+    st.error("State names could not be detected.")
+    st.write("Available columns in states layer:")
+    st.write(states_gdf.columns.tolist())
     st.stop()
+
+
+# ============================================================
+# Sidebar controls
+# ============================================================
+
+st.sidebar.header("1. India and State Selection")
 
 default_state = "Chhattisgarh"
 
-if default_state in state_names:
-    default_state_index = state_names.index(default_state)
+state_names_normalized = [normalize_text(x) for x in state_names]
+
+if normalize_text(default_state) in state_names_normalized:
+    default_state_index = state_names_normalized.index(normalize_text(default_state))
 else:
     default_state_index = 0
 
 selected_state_name = st.sidebar.selectbox(
-    "Select state to highlight",
+    "Select State / UT",
     state_names,
     index=default_state_index
 )
 
 selected_state_gdf = filter_state(
-    india_states_gdf,
+    states_gdf,
     state_col,
     selected_state_name
 )
 
 if selected_state_gdf.empty:
-    st.error("Selected state could not be found in the state boundary file.")
+    st.error("Selected state could not be extracted.")
     st.stop()
 
+
+india_panel_mode = st.sidebar.selectbox(
+    "Top-left India panel",
+    [
+        "Complete India with selected state highlighted",
+        "Selected state only"
+    ],
+    index=0
+)
+
+
+state_panel_mode = st.sidebar.selectbox(
+    "Bottom-left state panel",
+    [
+        "Complete selected state with district boundaries",
+        "Selected district only",
+        "Selected state with study area"
+    ],
+    index=0
+)
+
+
 state_districts_gdf = filter_districts_for_state(
-    india_districts_gdf,
+    districts_gdf,
+    district_state_col,
     selected_state_gdf,
     selected_state_name
 )
 
-district_col = find_first_existing_column(
-    state_districts_gdf,
-    DISTRICT_COLUMN_CANDIDATES
-)
+district_col = detect_district_column(state_districts_gdf)
 
 selected_district_gdf = None
 selected_district_name = "None"
@@ -675,7 +942,7 @@ if district_col is not None and not state_districts_gdf.empty:
     )
 
     selected_district_name = st.sidebar.selectbox(
-        "Optional: district to highlight",
+        "Optional: Select district to highlight",
         ["None"] + district_names,
         index=0
     )
@@ -684,6 +951,7 @@ if district_col is not None and not state_districts_gdf.empty:
         selected_district_gdf = state_districts_gdf[
             state_districts_gdf[district_col].astype(str) == selected_district_name
         ].copy()
+
 
 st.sidebar.header("2. Upload Study Area")
 
@@ -703,6 +971,7 @@ dem_file = st.sidebar.file_uploader(
     type=["tif", "tiff"]
 )
 
+
 st.sidebar.header("3. Map Titles")
 
 country_title = st.sidebar.text_input(
@@ -712,13 +981,14 @@ country_title = st.sidebar.text_input(
 
 state_title = st.sidebar.text_input(
     "Bottom-left panel title",
-    value=selected_state_name
+    value=str(selected_state_name)
 )
 
 main_title = st.sidebar.text_input(
     "Main panel title",
     value="Study Area"
 )
+
 
 st.sidebar.header("4. Map Style")
 
@@ -738,16 +1008,16 @@ state_fill = st.sidebar.color_picker(
 )
 
 district_highlight_color = st.sidebar.color_picker(
-    "District/catchment highlight color",
+    "District/study area highlight color",
     value="#1f78ff"
 )
 
-catchment_boundary_color = st.sidebar.color_picker(
+study_boundary_color = st.sidebar.color_picker(
     "Study area boundary color",
     value="#000000"
 )
 
-catchment_fill_color = st.sidebar.color_picker(
+study_fill_color = st.sidebar.color_picker(
     "Study area fill color without DEM",
     value="#1f78ff"
 )
@@ -764,41 +1034,51 @@ output_dpi = st.sidebar.selectbox(
     index=2
 )
 
-show_district_boundaries_main = st.sidebar.checkbox(
-    "Show district boundaries in main map background",
+show_main_district_background = st.sidebar.checkbox(
+    "Show district boundaries in main panel background",
     value=False
 )
 
-show_legend_main = st.sidebar.checkbox(
-    "Show main map legend when no DEM is used",
+show_main_legend_without_dem = st.sidebar.checkbox(
+    "Show main legend when DEM is not used",
     value=True
 )
 
 
 # ============================================================
-# Main app
+# Stop until study file is uploaded
 # ============================================================
 
 if study_file is None:
     st.info(
         """
-        Upload your **study area / catchment shapefile ZIP** to generate the map.
+        Upload your **study area / catchment boundary** to generate the final map.
 
-        The app will automatically use India state and district boundaries from GitHub.
-        You may also upload a DEM GeoTIFF to create a colored elevation map in the main panel.
+        India and district boundaries are loaded automatically.  
+        You can select the required **State / UT** from the sidebar dropdown.
         """
     )
 
-    st.write("### Required upload")
-    st.write("- Study area/catchment boundary as ZIP shapefile, GeoJSON, or GPKG")
+    st.write("### Required")
+    st.write("- Study area/catchment file: ZIP shapefile, GeoJSON, JSON or GPKG")
 
-    st.write("### Optional upload")
-    st.write("- DEM GeoTIFF for the main panel")
+    st.write("### Optional")
+    st.write("- DEM GeoTIFF for elevation map in the main panel")
+
+    with st.expander("Detected administrative columns"):
+        st.write("Detected state column:", state_col)
+        st.write("Detected district-state column:", district_state_col)
+        st.write("Detected district column:", district_col)
+        st.write("Available state names:")
+        st.write(state_names)
 
     st.stop()
 
 
-# Persistent temporary working folder
+# ============================================================
+# Read uploaded study area and DEM
+# ============================================================
+
 if "study_map_workdir" not in st.session_state:
     st.session_state["study_map_workdir"] = tempfile.mkdtemp(prefix="study_area_map_")
 
@@ -822,7 +1102,7 @@ except Exception as e:
 
 
 # ============================================================
-# Study area feature filtering
+# Study area feature filter
 # ============================================================
 
 st.subheader("Study Area Feature Selection")
@@ -865,9 +1145,7 @@ with col2:
         )
 
 with col3:
-    st.write("Selected feature count")
-    st.metric("Features", len(study_selected_gdf))
-
+    st.metric("Selected features", len(study_selected_gdf))
 
 if study_selected_gdf.empty:
     st.error("Selected study area is empty.")
@@ -875,38 +1153,49 @@ if study_selected_gdf.empty:
 
 
 # ============================================================
-# Figure creation
+# Create figure layout
 # ============================================================
 
 fig = plt.figure(figsize=(13, 8), dpi=output_dpi)
 
-# Layout similar to uploaded sample
 ax_india = fig.add_axes([0.05, 0.55, 0.38, 0.37])
 ax_state = fig.add_axes([0.05, 0.08, 0.38, 0.37])
 ax_main = fig.add_axes([0.50, 0.08, 0.45, 0.84])
 
 
 # ============================================================
-# Panel 1: India location map
+# Panel 1: India panel
 # ============================================================
 
-india_states_gdf.plot(
-    ax=ax_india,
-    color=country_fill,
-    edgecolor="black",
-    linewidth=0.35,
-    zorder=1
-)
+if india_panel_mode == "Complete India with selected state highlighted":
+    states_gdf.plot(
+        ax=ax_india,
+        color=country_fill,
+        edgecolor="black",
+        linewidth=0.35,
+        zorder=1
+    )
 
-selected_state_gdf.plot(
-    ax=ax_india,
-    color=state_highlight_color,
-    edgecolor="black",
-    linewidth=0.55,
-    zorder=3
-)
+    selected_state_gdf.plot(
+        ax=ax_india,
+        color=state_highlight_color,
+        edgecolor="black",
+        linewidth=0.65,
+        zorder=3
+    )
 
-set_extent(ax_india, india_states_gdf, pad=0.04)
+    set_extent(ax_india, states_gdf, pad=0.04)
+
+else:
+    selected_state_gdf.plot(
+        ax=ax_india,
+        color=state_highlight_color,
+        edgecolor="black",
+        linewidth=0.65,
+        zorder=3
+    )
+
+    set_extent(ax_india, selected_state_gdf, pad=0.08)
 
 add_panel_title(ax_india, country_title, fontsize=14)
 add_north_arrow(ax_india, x=0.88, y=0.77, size=0.10)
@@ -916,44 +1205,86 @@ add_map_border(ax_india)
 
 
 # ============================================================
-# Panel 2: State / district context map
+# Panel 2: State / district panel
 # ============================================================
 
-state_districts_gdf.plot(
-    ax=ax_state,
-    color=state_fill,
-    edgecolor="black",
-    linewidth=0.35,
-    zorder=1
-)
+if state_panel_mode == "Complete selected state with district boundaries":
+    state_districts_gdf.plot(
+        ax=ax_state,
+        color=state_fill,
+        edgecolor="black",
+        linewidth=0.35,
+        zorder=1
+    )
 
-selected_state_gdf.boundary.plot(
-    ax=ax_state,
-    color="black",
-    linewidth=0.8,
-    zorder=2
-)
+    selected_state_gdf.boundary.plot(
+        ax=ax_state,
+        color="black",
+        linewidth=0.9,
+        zorder=2
+    )
 
-if selected_district_gdf is not None and not selected_district_gdf.empty:
-    selected_district_gdf.plot(
+    if selected_district_gdf is not None and not selected_district_gdf.empty:
+        selected_district_gdf.plot(
+            ax=ax_state,
+            color=district_highlight_color,
+            edgecolor="black",
+            linewidth=0.6,
+            zorder=3
+        )
+
+    study_selected_gdf.plot(
         ax=ax_state,
         color=district_highlight_color,
         edgecolor="black",
-        linewidth=0.6,
+        linewidth=0.7,
+        alpha=0.90,
+        zorder=4
+    )
+
+    set_extent(ax_state, selected_state_gdf, pad=0.08)
+
+
+elif state_panel_mode == "Selected district only" and selected_district_gdf is not None and not selected_district_gdf.empty:
+    selected_district_gdf.plot(
+        ax=ax_state,
+        color=state_fill,
+        edgecolor="black",
+        linewidth=0.7,
+        zorder=1
+    )
+
+    study_selected_gdf.plot(
+        ax=ax_state,
+        color=district_highlight_color,
+        edgecolor="black",
+        linewidth=0.7,
+        alpha=0.90,
         zorder=3
     )
 
-# Plot actual study area in state panel
-study_selected_gdf.plot(
-    ax=ax_state,
-    color=district_highlight_color,
-    edgecolor="black",
-    linewidth=0.7,
-    alpha=0.90,
-    zorder=4
-)
+    set_extent(ax_state, selected_district_gdf, pad=0.12)
 
-set_extent(ax_state, selected_state_gdf, pad=0.08)
+
+else:
+    selected_state_gdf.plot(
+        ax=ax_state,
+        color=state_fill,
+        edgecolor="black",
+        linewidth=0.8,
+        zorder=1
+    )
+
+    study_selected_gdf.plot(
+        ax=ax_state,
+        color=district_highlight_color,
+        edgecolor="black",
+        linewidth=0.7,
+        alpha=0.90,
+        zorder=3
+    )
+
+    set_extent(ax_state, selected_state_gdf, pad=0.08)
 
 add_panel_title(ax_state, state_title, fontsize=14)
 add_north_arrow(ax_state, x=0.88, y=0.77, size=0.10)
@@ -963,12 +1294,12 @@ add_map_border(ax_state)
 
 
 # ============================================================
-# Panel 3: Main study area / DEM map
+# Panel 3: Main study area / DEM panel
 # ============================================================
 
 dem_plotted = False
 
-if show_district_boundaries_main:
+if show_main_district_background:
     try:
         state_districts_gdf.boundary.plot(
             ax=ax_main,
@@ -991,7 +1322,7 @@ if dem_path is not None:
 
         study_selected_gdf.boundary.plot(
             ax=ax_main,
-            color=catchment_boundary_color,
+            color=study_boundary_color,
             linewidth=0.8,
             zorder=5
         )
@@ -1007,22 +1338,22 @@ if dem_path is not None:
         dem_plotted = True
 
     except Exception as e:
-        st.warning(f"DEM could not be plotted. Showing study area boundary only. Error: {e}")
+        st.warning(f"DEM could not be plotted. Boundary map will be shown instead. Error: {e}")
 
 if not dem_plotted:
     study_selected_gdf.plot(
         ax=ax_main,
-        color=catchment_fill_color,
-        edgecolor=catchment_boundary_color,
+        color=study_fill_color,
+        edgecolor=study_boundary_color,
         linewidth=0.8,
         alpha=0.90,
         zorder=3
     )
 
-    if show_legend_main:
+    if show_main_legend_without_dem:
         main_patch = Patch(
-            facecolor=catchment_fill_color,
-            edgecolor=catchment_boundary_color,
+            facecolor=study_fill_color,
+            edgecolor=study_boundary_color,
             label="Study Area"
         )
 
@@ -1044,7 +1375,7 @@ add_map_border(ax_main)
 
 
 # ============================================================
-# Connecting lines between inset panels and main map
+# Connecting lines
 # ============================================================
 
 try:
@@ -1095,7 +1426,6 @@ pdf_buffer = io.BytesIO()
 fig.savefig(
     pdf_buffer,
     format="pdf",
-    dpi=output_dpi,
     bbox_inches="tight",
     facecolor="white"
 )
@@ -1132,31 +1462,39 @@ plt.close(fig)
 # Layer information
 # ============================================================
 
-with st.expander("Layer information"):
+with st.expander("Layer information and detected fields"):
     st.write("### India states layer")
-    st.write(f"Features: {len(india_states_gdf)}")
-    st.write(f"CRS: {india_states_gdf.crs}")
+    st.write(f"Features: {len(states_gdf)}")
+    st.write(f"CRS: {states_gdf.crs}")
+    st.write(f"Detected state column: {state_col}")
 
     st.write("### India districts layer")
-    st.write(f"Features: {len(india_districts_gdf)}")
-    st.write(f"CRS: {india_districts_gdf.crs}")
+    st.write(f"Features: {len(districts_gdf)}")
+    st.write(f"CRS: {districts_gdf.crs}")
+    st.write(f"Detected district-state column: {district_state_col}")
+    st.write(f"Detected district column: {district_col}")
 
     st.write("### Selected state")
     st.write(selected_state_name)
 
-    st.write("### State districts used in bottom-left panel")
+    st.write("### State districts used")
     st.write(f"Features: {len(state_districts_gdf)}")
 
     st.write("### Study area")
     st.write(f"Features: {len(study_selected_gdf)}")
     st.write(f"CRS: {study_selected_gdf.crs}")
 
+    st.write("### Raw states columns")
+    st.write(raw_states_gdf.columns.tolist())
+
+    st.write("### Raw districts columns")
+    st.write(raw_districts_gdf.columns.tolist())
+
 
 st.markdown("---")
-
 st.markdown(
     """
-    **Note:** For official reports, verify the administrative boundary layer before submission.
-    The app is intended for academic, research, and publication-style study area maps.
+    **Note:** Administrative boundaries from public repositories should be verified before use in official/legal maps.  
+    This app is intended for research, academic reports, theses and publication-style study area figures.
     """
 )
