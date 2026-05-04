@@ -16,6 +16,7 @@ from rasterio.vrt import WarpedVRT
 from rasterio.enums import Resampling
 from rasterio.plot import plotting_extent
 
+from shapely.geometry import box
 from matplotlib.patches import Rectangle, Patch, ConnectionPatch
 from matplotlib.colors import Normalize
 from matplotlib.ticker import FuncFormatter, MaxNLocator
@@ -347,6 +348,7 @@ def prepare_admin_layers(states_gdf, districts_gdf):
     if state_col is not None:
         prepared_states = states_gdf.copy()
         prepared_state_col = state_col
+
     else:
         district_state_col = detect_state_column(districts_gdf)
 
@@ -403,7 +405,7 @@ def filter_state(states_gdf, state_col, selected_state):
         return exact
 
     partial = states_gdf[
-        state_series.str.contains(selected_norm, na=False)
+        state_series.str.contains(selected_norm, na=False, regex=False)
     ].copy()
 
     if not partial.empty:
@@ -431,14 +433,14 @@ def filter_districts_for_state(districts_gdf, district_state_col, selected_state
             return exact
 
         partial = districts_gdf[
-            state_series.str.contains(selected_norm, na=False)
+            state_series.str.contains(selected_norm, na=False, regex=False)
         ].copy()
 
         if not partial.empty:
             return partial
 
     if selected_state_gdf is not None and not selected_state_gdf.empty:
-        state_geom = selected_state_gdf.geometry.union_all()
+        state_geom = selected_state_gdf.geometry.unary_union
 
         spatial = districts_gdf[
             districts_gdf.geometry.intersects(state_geom)
@@ -526,7 +528,7 @@ def format_dms(value, is_lon=True):
 
 def apply_degree_grid(ax, fontsize=7, xbins=4, ybins=4):
     """
-    Add degree grid labels on all sides.
+    Add degree labels on all sides.
     """
     ax.xaxis.set_major_locator(MaxNLocator(nbins=xbins))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=ybins))
@@ -560,60 +562,71 @@ def apply_degree_grid(ax, fontsize=7, xbins=4, ybins=4):
     ax.grid(False)
 
 
-def add_north_arrow(ax, x=0.90, y=0.78, size=0.11):
+def add_north_arrow(ax, x=0.90, y=0.82, fontsize=10):
     """
-    Add north arrow with N, S, E and W.
+    Add simple N-S-E-W compass without pointed arrow.
     """
-    ax.annotate(
+    ax.text(
+        x,
+        y + 0.060,
         "N",
-        xy=(x, y + size),
-        xytext=(x, y),
-        xycoords="axes fraction",
+        transform=ax.transAxes,
         ha="center",
         va="center",
-        fontsize=10,
+        fontsize=fontsize,
         fontweight="bold",
-        arrowprops=dict(
-            facecolor="black",
-            edgecolor="black",
-            width=3,
-            headwidth=10,
-            headlength=12
-        ),
         zorder=50
     )
 
     ax.text(
         x,
-        y - 0.055,
+        y - 0.060,
         "S",
         transform=ax.transAxes,
         ha="center",
         va="center",
-        fontsize=7,
+        fontsize=fontsize - 2,
         zorder=50
     )
 
     ax.text(
-        x - 0.065,
-        y + 0.035,
+        x - 0.060,
+        y,
         "W",
         transform=ax.transAxes,
         ha="center",
         va="center",
-        fontsize=7,
+        fontsize=fontsize - 2,
         zorder=50
     )
 
     ax.text(
-        x + 0.065,
-        y + 0.035,
+        x + 0.060,
+        y,
         "E",
         transform=ax.transAxes,
         ha="center",
         va="center",
-        fontsize=7,
+        fontsize=fontsize - 2,
         zorder=50
+    )
+
+    ax.plot(
+        [x, x],
+        [y - 0.040, y + 0.040],
+        transform=ax.transAxes,
+        color="black",
+        linewidth=1.1,
+        zorder=49
+    )
+
+    ax.plot(
+        [x - 0.040, x + 0.040],
+        [y, y],
+        transform=ax.transAxes,
+        color="black",
+        linewidth=1.1,
+        zorder=49
     )
 
 
@@ -718,20 +731,108 @@ def add_scale_bar_degree(ax, location=(0.08, 0.065), segments=4, fontsize=7):
     )
 
 
-def add_panel_title(ax, title, fontsize=14):
+def axes_box_to_data_box(ax, axes_box):
     """
-    Add map title inside panel.
+    Convert an axes-fraction box to a shapely data-coordinate box.
+    axes_box = (x0, y0, x1, y1) in axes fraction.
     """
-    ax.text(
-        0.05,
-        0.94,
-        title,
-        transform=ax.transAxes,
-        fontsize=fontsize,
-        ha="left",
-        va="top",
-        zorder=60
+    x0, y0, x1, y1 = axes_box
+
+    pts_axes = np.array([
+        [x0, y0],
+        [x1, y1]
+    ])
+
+    pts_display = ax.transAxes.transform(pts_axes)
+    pts_data = ax.transData.inverted().transform(pts_display)
+
+    minx = min(pts_data[0, 0], pts_data[1, 0])
+    maxx = max(pts_data[0, 0], pts_data[1, 0])
+    miny = min(pts_data[0, 1], pts_data[1, 1])
+    maxy = max(pts_data[0, 1], pts_data[1, 1])
+
+    return box(minx, miny, maxx, maxy)
+
+
+def title_box_intersects_geometry(ax, gdf, axes_box):
+    """
+    Check whether the proposed title area intersects polygon boundaries.
+    """
+    if gdf is None or gdf.empty:
+        return False
+
+    try:
+        candidate_box = axes_box_to_data_box(ax, axes_box)
+
+        return gdf.geometry.intersects(candidate_box).any()
+
+    except Exception:
+        return False
+
+
+def add_safe_panel_title(ax, title, gdf_for_check=None, fontsize=12, mode="Auto safe"):
+    """
+    Add title without overlapping polygon boundary.
+
+    Modes:
+    - Auto safe: tries inside top-left; if it intersects geometry, places title outside above frame.
+    - Always outside: places title outside above map frame.
+    - Inside top-left with white box: places title inside with a white background.
+    """
+    title = str(title)
+
+    bbox_style = dict(
+        boxstyle="round,pad=0.18",
+        facecolor="white",
+        edgecolor="none",
+        alpha=0.85
     )
+
+    title_width = min(0.72, 0.14 + 0.018 * len(title))
+    title_height = 0.095
+
+    inside_box = (
+        0.035,
+        0.845,
+        0.035 + title_width,
+        0.845 + title_height
+    )
+
+    place_outside = False
+
+    if mode == "Always outside":
+        place_outside = True
+
+    elif mode == "Auto safe":
+        if title_box_intersects_geometry(ax, gdf_for_check, inside_box):
+            place_outside = True
+
+    if place_outside:
+        ax.text(
+            0.02,
+            1.115,
+            title,
+            transform=ax.transAxes,
+            fontsize=fontsize,
+            ha="left",
+            va="bottom",
+            zorder=100,
+            clip_on=False,
+            bbox=bbox_style
+        )
+
+    else:
+        ax.text(
+            0.045,
+            0.925,
+            title,
+            transform=ax.transAxes,
+            fontsize=fontsize,
+            ha="left",
+            va="top",
+            zorder=100,
+            bbox=bbox_style
+        )
 
 
 def add_map_border(ax, linewidth=1.0):
@@ -872,7 +973,7 @@ if not state_names:
 
 st.sidebar.header("1. India and State Selection")
 
-default_state = "Chhattisgarh"
+default_state = "Maharashtra"
 
 state_names_normalized = [normalize_text(x) for x in state_names]
 
@@ -981,7 +1082,7 @@ country_title = st.sidebar.text_input(
 
 state_title = st.sidebar.text_input(
     "Bottom-left panel title",
-    value=str(selected_state_name)
+    value=str(selected_state_name).upper()
 )
 
 main_title = st.sidebar.text_input(
@@ -989,12 +1090,23 @@ main_title = st.sidebar.text_input(
     value="Study Area"
 )
 
+title_mode = st.sidebar.selectbox(
+    "Title placement",
+    [
+        "Auto safe",
+        "Always outside",
+        "Inside top-left with white box"
+    ],
+    index=0,
+    help="Auto safe checks title overlap with polygon area. If overlap is detected, title is moved above the map frame."
+)
+
 
 st.sidebar.header("4. Map Style")
 
 country_fill = st.sidebar.color_picker(
     "India map fill",
-    value="#cbe7f2"
+    value="#dff2cf"
 )
 
 state_highlight_color = st.sidebar.color_picker(
@@ -1004,12 +1116,12 @@ state_highlight_color = st.sidebar.color_picker(
 
 state_fill = st.sidebar.color_picker(
     "State/district panel fill",
-    value="#f4b6b6"
+    value="#c8b2f0"
 )
 
 district_highlight_color = st.sidebar.color_picker(
     "District/study area highlight color",
-    value="#1f78ff"
+    value="#ffd43b"
 )
 
 study_boundary_color = st.sidebar.color_picker(
@@ -1041,6 +1153,11 @@ show_main_district_background = st.sidebar.checkbox(
 
 show_main_legend_without_dem = st.sidebar.checkbox(
     "Show main legend when DEM is not used",
+    value=True
+)
+
+show_connecting_lines = st.sidebar.checkbox(
+    "Show connecting lines",
     value=True
 )
 
@@ -1153,14 +1270,16 @@ if study_selected_gdf.empty:
 
 
 # ============================================================
-# Create figure layout
+# Create compact figure layout
 # ============================================================
 
 fig = plt.figure(figsize=(13, 8), dpi=output_dpi)
 
-ax_india = fig.add_axes([0.05, 0.55, 0.38, 0.37])
-ax_state = fig.add_axes([0.05, 0.08, 0.38, 0.37])
-ax_main = fig.add_axes([0.50, 0.08, 0.45, 0.84])
+# Compact layout with reduced gap between inset panels and main map.
+# Format: [left, bottom, width, height]
+ax_india = fig.add_axes([0.040, 0.555, 0.350, 0.365])
+ax_state = fig.add_axes([0.040, 0.085, 0.350, 0.365])
+ax_main = fig.add_axes([0.400, 0.085, 0.560, 0.835])
 
 
 # ============================================================
@@ -1185,6 +1304,7 @@ if india_panel_mode == "Complete India with selected state highlighted":
     )
 
     set_extent(ax_india, states_gdf, pad=0.04)
+    title_check_gdf_india = states_gdf
 
 else:
     selected_state_gdf.plot(
@@ -1196,9 +1316,17 @@ else:
     )
 
     set_extent(ax_india, selected_state_gdf, pad=0.08)
+    title_check_gdf_india = selected_state_gdf
 
-add_panel_title(ax_india, country_title, fontsize=14)
-add_north_arrow(ax_india, x=0.88, y=0.77, size=0.10)
+add_safe_panel_title(
+    ax_india,
+    country_title,
+    gdf_for_check=title_check_gdf_india,
+    fontsize=12,
+    mode=title_mode
+)
+
+add_north_arrow(ax_india, x=0.88, y=0.78, fontsize=10)
 add_scale_bar_degree(ax_india, location=(0.08, 0.06), fontsize=7)
 apply_degree_grid(ax_india, fontsize=7, xbins=4, ybins=4)
 add_map_border(ax_india)
@@ -1243,7 +1371,7 @@ if state_panel_mode == "Complete selected state with district boundaries":
     )
 
     set_extent(ax_state, selected_state_gdf, pad=0.08)
-
+    title_check_gdf_state = selected_state_gdf
 
 elif state_panel_mode == "Selected district only" and selected_district_gdf is not None and not selected_district_gdf.empty:
     selected_district_gdf.plot(
@@ -1264,7 +1392,7 @@ elif state_panel_mode == "Selected district only" and selected_district_gdf is n
     )
 
     set_extent(ax_state, selected_district_gdf, pad=0.12)
-
+    title_check_gdf_state = selected_district_gdf
 
 else:
     selected_state_gdf.plot(
@@ -1285,9 +1413,17 @@ else:
     )
 
     set_extent(ax_state, selected_state_gdf, pad=0.08)
+    title_check_gdf_state = selected_state_gdf
 
-add_panel_title(ax_state, state_title, fontsize=14)
-add_north_arrow(ax_state, x=0.88, y=0.77, size=0.10)
+add_safe_panel_title(
+    ax_state,
+    state_title,
+    gdf_for_check=title_check_gdf_state,
+    fontsize=12,
+    mode=title_mode
+)
+
+add_north_arrow(ax_state, x=0.88, y=0.78, fontsize=10)
 add_scale_bar_degree(ax_state, location=(0.08, 0.06), fontsize=7)
 apply_degree_grid(ax_state, fontsize=7, xbins=4, ybins=4)
 add_map_border(ax_state)
@@ -1367,8 +1503,15 @@ if not dem_plotted:
 
 set_extent(ax_main, study_selected_gdf, pad=0.08)
 
-add_panel_title(ax_main, main_title, fontsize=14)
-add_north_arrow(ax_main, x=0.90, y=0.82, size=0.10)
+add_safe_panel_title(
+    ax_main,
+    main_title,
+    gdf_for_check=study_selected_gdf,
+    fontsize=12,
+    mode=title_mode
+)
+
+add_north_arrow(ax_main, x=0.90, y=0.82, fontsize=11)
 add_scale_bar_degree(ax_main, location=(0.08, 0.055), fontsize=7)
 apply_degree_grid(ax_main, fontsize=8, xbins=4, ybins=7)
 add_map_border(ax_main)
@@ -1378,32 +1521,35 @@ add_map_border(ax_main)
 # Connecting lines
 # ============================================================
 
-try:
-    con1 = ConnectionPatch(
-        xyA=(0.98, 0.12),
-        coordsA=ax_india.transAxes,
-        xyB=(0.02, 0.92),
-        coordsB=ax_main.transAxes,
-        color="black",
-        linewidth=1.2,
-        zorder=80
-    )
+if show_connecting_lines:
+    try:
+        con1 = ConnectionPatch(
+            xyA=(0.98, 0.20),
+            coordsA=ax_india.transAxes,
+            xyB=(0.00, 0.90),
+            coordsB=ax_main.transAxes,
+            color="black",
+            linewidth=1.1,
+            zorder=80,
+            arrowstyle="-"
+        )
 
-    con2 = ConnectionPatch(
-        xyA=(0.98, 0.78),
-        coordsA=ax_state.transAxes,
-        xyB=(0.02, 0.18),
-        coordsB=ax_main.transAxes,
-        color="black",
-        linewidth=1.2,
-        zorder=80
-    )
+        con2 = ConnectionPatch(
+            xyA=(0.98, 0.72),
+            coordsA=ax_state.transAxes,
+            xyB=(0.00, 0.20),
+            coordsB=ax_main.transAxes,
+            color="black",
+            linewidth=1.1,
+            zorder=80,
+            arrowstyle="-"
+        )
 
-    fig.add_artist(con1)
-    fig.add_artist(con2)
+        fig.add_artist(con1)
+        fig.add_artist(con2)
 
-except Exception:
-    pass
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -1426,6 +1572,7 @@ pdf_buffer = io.BytesIO()
 fig.savefig(
     pdf_buffer,
     format="pdf",
+    dpi=output_dpi,
     bbox_inches="tight",
     facecolor="white"
 )
