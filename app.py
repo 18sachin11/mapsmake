@@ -34,7 +34,7 @@ st.set_page_config(
 
 st.title("🗺️ Study Area Map Generator")
 st.caption(
-    "Generate publication-style study area maps with India inset, state/district inset, main study area map, DEM, north arrow, scale bar and legends."
+    "Generate publication-style study area maps with India inset, state/district inset, DEM map, north arrow, scale bar, legend and smart empty-space placement."
 )
 
 
@@ -124,9 +124,6 @@ DISTRICT_COLUMN_CANDIDATES = [
 # ============================================================
 
 def normalize_text(x):
-    """
-    Normalize names for flexible matching.
-    """
     x = str(x).strip().upper()
     x = x.replace("&", "AND")
     x = x.replace(".", "")
@@ -136,9 +133,6 @@ def normalize_text(x):
 
 
 def find_first_existing_column(gdf, candidates):
-    """
-    Find direct or case-insensitive matching column.
-    """
     if gdf is None or gdf.empty:
         return None
 
@@ -155,9 +149,6 @@ def find_first_existing_column(gdf, candidates):
 
 
 def detect_state_column(gdf):
-    """
-    Detect state-name column using candidates and known state names.
-    """
     direct = find_first_existing_column(gdf, STATE_COLUMN_CANDIDATES)
 
     if direct is not None:
@@ -198,9 +189,6 @@ def detect_state_column(gdf):
 
 
 def detect_district_column(gdf):
-    """
-    Detect district-name column.
-    """
     direct = find_first_existing_column(gdf, DISTRICT_COLUMN_CANDIDATES)
 
     if direct is not None:
@@ -230,9 +218,6 @@ def detect_district_column(gdf):
 
 @st.cache_data(show_spinner=True)
 def load_geojson_from_url(url):
-    """
-    Download GeoJSON and read as GeoDataFrame.
-    """
     headers = {
         "User-Agent": "study-area-map-generator"
     }
@@ -264,9 +249,6 @@ def load_geojson_from_url(url):
 
 
 def save_uploaded_file(uploaded_file, out_dir):
-    """
-    Save uploaded Streamlit file.
-    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -280,13 +262,6 @@ def save_uploaded_file(uploaded_file, out_dir):
 
 
 def read_uploaded_vector(uploaded_file, out_dir, default_crs="EPSG:4326"):
-    """
-    Read uploaded vector file.
-    Supports:
-    - ZIP shapefile
-    - GeoJSON
-    - GPKG
-    """
     saved_path = save_uploaded_file(uploaded_file, out_dir)
     suffix = saved_path.suffix.lower()
 
@@ -323,9 +298,6 @@ def read_uploaded_vector(uploaded_file, out_dir, default_crs="EPSG:4326"):
 
 
 def read_uploaded_raster(uploaded_file, out_dir):
-    """
-    Save uploaded DEM GeoTIFF.
-    """
     if uploaded_file is None:
         return None
 
@@ -337,12 +309,6 @@ def read_uploaded_raster(uploaded_file, out_dir):
 # ============================================================
 
 def prepare_admin_layers(states_gdf, districts_gdf):
-    """
-    Prepare state and district layers robustly.
-
-    If state names cannot be detected in the states layer, the code tries
-    to dissolve the district layer by state column to create state polygons.
-    """
     state_col = detect_state_column(states_gdf)
 
     if state_col is not None:
@@ -377,9 +343,6 @@ def prepare_admin_layers(states_gdf, districts_gdf):
 
 
 def get_state_names(states_gdf, state_col):
-    """
-    Extract state names for dropdown.
-    """
     names = (
         states_gdf[state_col]
         .dropna()
@@ -393,9 +356,6 @@ def get_state_names(states_gdf, state_col):
 
 
 def filter_state(states_gdf, state_col, selected_state):
-    """
-    Select state polygon by name.
-    """
     selected_norm = normalize_text(selected_state)
     state_series = states_gdf[state_col].astype(str).apply(normalize_text)
 
@@ -418,13 +378,19 @@ def filter_state(states_gdf, state_col, selected_state):
     return reverse
 
 
+def get_union_geometry(gdf):
+    if gdf is None or gdf.empty:
+        return None
+
+    try:
+        return gdf.geometry.union_all()
+    except Exception:
+        return gdf.geometry.unary_union
+
+
 def filter_districts_for_state(districts_gdf, district_state_col, selected_state_gdf, selected_state_name):
-    """
-    Filter districts of selected state using attribute first, then spatial intersection.
-    """
     if district_state_col is not None:
         selected_norm = normalize_text(selected_state_name)
-
         state_series = districts_gdf[district_state_col].astype(str).apply(normalize_text)
 
         exact = districts_gdf[state_series == selected_norm].copy()
@@ -440,7 +406,7 @@ def filter_districts_for_state(districts_gdf, district_state_col, selected_state
             return partial
 
     if selected_state_gdf is not None and not selected_state_gdf.empty:
-        state_geom = selected_state_gdf.geometry.unary_union
+        state_geom = get_union_geometry(selected_state_gdf)
 
         spatial = districts_gdf[
             districts_gdf.geometry.intersects(state_geom)
@@ -453,9 +419,6 @@ def filter_districts_for_state(districts_gdf, district_state_col, selected_state
 
 
 def filter_by_attribute(gdf, column, value):
-    """
-    Filter GeoDataFrame by selected attribute.
-    """
     if column == "None" or value == "All":
         return gdf.copy()
 
@@ -467,9 +430,6 @@ def filter_by_attribute(gdf, column, value):
 # ============================================================
 
 def padded_bounds(bounds, pad=0.08):
-    """
-    Add padding to bounds.
-    """
     minx, miny, maxx, maxy = bounds
 
     dx = maxx - minx
@@ -489,10 +449,7 @@ def padded_bounds(bounds, pad=0.08):
     ]
 
 
-def set_extent(ax, gdf, pad=0.08):
-    """
-    Set map extent using GeoDataFrame.
-    """
+def set_extent(ax, gdf, pad=0.12):
     minx, miny, maxx, maxy = padded_bounds(gdf.total_bounds, pad=pad)
 
     ax.set_xlim(minx, maxx)
@@ -500,9 +457,6 @@ def set_extent(ax, gdf, pad=0.08):
 
 
 def format_dms(value, is_lon=True):
-    """
-    Decimal degree to DMS label.
-    """
     if is_lon:
         hemi = "E" if value >= 0 else "W"
     else:
@@ -527,9 +481,6 @@ def format_dms(value, is_lon=True):
 
 
 def apply_degree_grid(ax, fontsize=7, xbins=4, ybins=4):
-    """
-    Add degree labels on all sides.
-    """
     ax.xaxis.set_major_locator(MaxNLocator(nbins=xbins))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=ybins))
 
@@ -562,299 +513,21 @@ def apply_degree_grid(ax, fontsize=7, xbins=4, ybins=4):
     ax.grid(False)
 
 
-def add_north_arrow(ax, x=0.90, y=0.82, fontsize=10):
-    """
-    Add simple N-S-E-W compass without pointed arrow.
-    """
-    ax.text(
-        x,
-        y + 0.060,
-        "N",
-        transform=ax.transAxes,
-        ha="center",
-        va="center",
-        fontsize=fontsize,
-        fontweight="bold",
-        zorder=50
-    )
-
-    ax.text(
-        x,
-        y - 0.060,
-        "S",
-        transform=ax.transAxes,
-        ha="center",
-        va="center",
-        fontsize=fontsize - 2,
-        zorder=50
-    )
-
-    ax.text(
-        x - 0.060,
-        y,
-        "W",
-        transform=ax.transAxes,
-        ha="center",
-        va="center",
-        fontsize=fontsize - 2,
-        zorder=50
-    )
-
-    ax.text(
-        x + 0.060,
-        y,
-        "E",
-        transform=ax.transAxes,
-        ha="center",
-        va="center",
-        fontsize=fontsize - 2,
-        zorder=50
-    )
-
-    ax.plot(
-        [x, x],
-        [y - 0.040, y + 0.040],
-        transform=ax.transAxes,
-        color="black",
-        linewidth=1.1,
-        zorder=49
-    )
-
-    ax.plot(
-        [x - 0.040, x + 0.040],
-        [y, y],
-        transform=ax.transAxes,
-        color="black",
-        linewidth=1.1,
-        zorder=49
-    )
-
-
-def km_to_degree_lon(km, latitude):
-    """
-    Approximate km to longitude degrees at given latitude.
-    """
-    denom = 111.32 * np.cos(np.deg2rad(latitude))
-
-    if abs(denom) < 1e-6:
-        denom = 111.32
-
-    return km / denom
-
-
-def choose_nice_scale_length(width_km):
-    """
-    Choose a cartographically clean scale length.
-    """
-    target = width_km / 5
-
-    nice_values = [
-        1, 2, 5,
-        10, 20, 25, 50, 75,
-        100, 150, 200, 250, 500, 750,
-        1000, 1500, 2000, 2500, 3000, 3500
-    ]
-
-    for value in nice_values:
-        if value >= target:
-            return value
-
-    return 5000
-
-
-def add_scale_bar_degree(ax, location=(0.08, 0.065), segments=4, fontsize=7):
-    """
-    Add approximate scale bar for geographic coordinate maps.
-    """
-    xlim = ax.get_xlim()
-    ylim = ax.get_ylim()
-
-    width_deg = xlim[1] - xlim[0]
-    height_deg = ylim[1] - ylim[0]
-
-    center_lat = (ylim[0] + ylim[1]) / 2
-
-    width_km = abs(width_deg * 111.32 * np.cos(np.deg2rad(center_lat)))
-
-    length_km = choose_nice_scale_length(width_km)
-    length_deg = km_to_degree_lon(length_km, center_lat)
-
-    x0 = xlim[0] + location[0] * width_deg
-    y0 = ylim[0] + location[1] * height_deg
-
-    segment_deg = length_deg / segments
-    bar_height = height_deg * 0.014
-
-    for i in range(segments):
-        face = "black" if i % 2 == 0 else "white"
-
-        rect = Rectangle(
-            (x0 + i * segment_deg, y0),
-            segment_deg,
-            bar_height,
-            facecolor=face,
-            edgecolor="black",
-            linewidth=0.5,
-            zorder=40
-        )
-
-        ax.add_patch(rect)
-
-    ax.text(
-        x0,
-        y0 + bar_height * 1.8,
-        "0",
-        ha="center",
-        va="bottom",
-        fontsize=fontsize,
-        zorder=41
-    )
-
-    ax.text(
-        x0 + length_deg,
-        y0 + bar_height * 1.8,
-        f"{int(length_km)}",
-        ha="center",
-        va="bottom",
-        fontsize=fontsize,
-        zorder=41
-    )
-
-    ax.text(
-        x0 + length_deg / 2,
-        y0 - bar_height * 1.9,
-        "Kilometers",
-        ha="center",
-        va="top",
-        fontsize=fontsize,
-        zorder=41
-    )
-
-
-def axes_box_to_data_box(ax, axes_box):
-    """
-    Convert an axes-fraction box to a shapely data-coordinate box.
-    axes_box = (x0, y0, x1, y1) in axes fraction.
-    """
-    x0, y0, x1, y1 = axes_box
-
-    pts_axes = np.array([
-        [x0, y0],
-        [x1, y1]
-    ])
-
-    pts_display = ax.transAxes.transform(pts_axes)
-    pts_data = ax.transData.inverted().transform(pts_display)
-
-    minx = min(pts_data[0, 0], pts_data[1, 0])
-    maxx = max(pts_data[0, 0], pts_data[1, 0])
-    miny = min(pts_data[0, 1], pts_data[1, 1])
-    maxy = max(pts_data[0, 1], pts_data[1, 1])
-
-    return box(minx, miny, maxx, maxy)
-
-
-def title_box_intersects_geometry(ax, gdf, axes_box):
-    """
-    Check whether the proposed title area intersects polygon boundaries.
-    """
-    if gdf is None or gdf.empty:
-        return False
-
-    try:
-        candidate_box = axes_box_to_data_box(ax, axes_box)
-
-        return gdf.geometry.intersects(candidate_box).any()
-
-    except Exception:
-        return False
-
-
-def add_safe_panel_title(ax, title, gdf_for_check=None, fontsize=12, mode="Auto safe"):
-    """
-    Add title without overlapping polygon boundary.
-
-    Modes:
-    - Auto safe: tries inside top-left; if it intersects geometry, places title outside above frame.
-    - Always outside: places title outside above map frame.
-    - Inside top-left with white box: places title inside with a white background.
-    """
-    title = str(title)
-
-    bbox_style = dict(
-        boxstyle="round,pad=0.18",
-        facecolor="white",
-        edgecolor="none",
-        alpha=0.85
-    )
-
-    title_width = min(0.72, 0.14 + 0.018 * len(title))
-    title_height = 0.095
-
-    inside_box = (
-        0.035,
-        0.845,
-        0.035 + title_width,
-        0.845 + title_height
-    )
-
-    place_outside = False
-
-    if mode == "Always outside":
-        place_outside = True
-
-    elif mode == "Auto safe":
-        if title_box_intersects_geometry(ax, gdf_for_check, inside_box):
-            place_outside = True
-
-    if place_outside:
-        ax.text(
-            0.02,
-            1.115,
-            title,
-            transform=ax.transAxes,
-            fontsize=fontsize,
-            ha="left",
-            va="bottom",
-            zorder=100,
-            clip_on=False,
-            bbox=bbox_style
-        )
-
-    else:
-        ax.text(
-            0.045,
-            0.925,
-            title,
-            transform=ax.transAxes,
-            fontsize=fontsize,
-            ha="left",
-            va="top",
-            zorder=100,
-            bbox=bbox_style
-        )
-
-
 def add_map_border(ax, linewidth=1.0):
-    """
-    Add black frame around map panel.
-    """
     for spine in ax.spines.values():
         spine.set_visible(True)
         spine.set_linewidth(linewidth)
         spine.set_edgecolor("black")
 
-# ============================================================
-# Smart map furniture placement
-# ============================================================
 
-from shapely.geometry import box
-
+# ============================================================
+# Smart furniture placement functions
+# ============================================================
 
 def axes_box_to_data_geom(ax, axes_box):
     """
-    Convert an axes-fraction box to data-coordinate shapely box.
-    axes_box = (x0, y0, x1, y1) in axes-fraction coordinates.
+    Convert an axes-fraction box to a shapely box in data coordinates.
+    axes_box = (x0, y0, x1, y1)
     """
     x0, y0, x1, y1 = axes_box
 
@@ -875,10 +548,6 @@ def axes_box_to_data_geom(ax, axes_box):
 
 
 def get_buffered_geometry(gdf, ax, buffer_ratio=0.015):
-    """
-    Create slightly buffered geometry so map furniture does not touch
-    polygon boundary too closely.
-    """
     if gdf is None or gdf.empty:
         return None
 
@@ -890,7 +559,7 @@ def get_buffered_geometry(gdf, ax, buffer_ratio=0.015):
 
     buffer_dist = min(width, height) * buffer_ratio
 
-    geom = gdf.geometry.unary_union
+    geom = get_union_geometry(gdf)
 
     try:
         geom = geom.buffer(buffer_dist)
@@ -901,9 +570,6 @@ def get_buffered_geometry(gdf, ax, buffer_ratio=0.015):
 
 
 def axes_boxes_overlap(box_a, box_b, pad=0.015):
-    """
-    Check if two axes-fraction boxes overlap.
-    """
     ax0, ay0, ax1, ay1 = box_a
     bx0, by0, bx1, by1 = box_b
 
@@ -916,9 +582,6 @@ def axes_boxes_overlap(box_a, box_b, pad=0.015):
 
 
 def box_is_inside_axes(axes_box):
-    """
-    Ensure box remains inside map frame.
-    """
     x0, y0, x1, y1 = axes_box
 
     return (
@@ -930,9 +593,6 @@ def box_is_inside_axes(axes_box):
 
 
 def box_intersects_geometry(ax, gdf, axes_box, buffer_ratio=0.015):
-    """
-    Check whether proposed axes box intersects mapped polygon.
-    """
     if gdf is None or gdf.empty:
         return False
 
@@ -953,14 +613,9 @@ def box_intersects_geometry(ax, gdf, axes_box, buffer_ratio=0.015):
 
 
 def choose_free_box(ax, gdf, candidate_boxes, occupied_boxes=None, buffer_ratio=0.015):
-    """
-    Choose the first candidate box that does not intersect geometry
-    and does not overlap existing map furniture.
-    """
     if occupied_boxes is None:
         occupied_boxes = []
 
-    # First pass: fully free boxes
     for candidate in candidate_boxes:
         if not box_is_inside_axes(candidate):
             continue
@@ -969,6 +624,7 @@ def choose_free_box(ax, gdf, candidate_boxes, occupied_boxes=None, buffer_ratio=
             continue
 
         overlap = False
+
         for existing in occupied_boxes:
             if axes_boxes_overlap(candidate, existing):
                 overlap = True
@@ -977,12 +633,12 @@ def choose_free_box(ax, gdf, candidate_boxes, occupied_boxes=None, buffer_ratio=
         if not overlap:
             return candidate
 
-    # Second pass: choose a box that avoids occupied boxes, even if near polygon
     for candidate in candidate_boxes:
         if not box_is_inside_axes(candidate):
             continue
 
         overlap = False
+
         for existing in occupied_boxes:
             if axes_boxes_overlap(candidate, existing):
                 overlap = True
@@ -991,80 +647,25 @@ def choose_free_box(ax, gdf, candidate_boxes, occupied_boxes=None, buffer_ratio=
         if not overlap:
             return candidate
 
-    # Final fallback
     return candidate_boxes[0]
 
 
 def add_smart_title(ax, title, gdf, occupied_boxes=None, fontsize=12):
-    """
-    Place title inside map panel in an empty location.
-    """
     if occupied_boxes is None:
         occupied_boxes = []
 
     title = str(title)
 
-    title_width = min(0.55, max(0.22, 0.035 + 0.018 * len(title)))
-    title_height = 0.075
+    title_width = min(0.60, max(0.22, 0.045 + 0.018 * len(title)))
+    title_height = 0.085
 
     candidate_boxes = [
-        (0.035, 0.900, 0.035 + title_width, 0.900 + title_height),  # top-left
-        (0.350, 0.900, 0.350 + title_width, 0.900 + title_height),  # top-centre
-        (0.985 - title_width, 0.900, 0.985, 0.900 + title_height),  # top-right
-        (0.035, 0.800, 0.035 + title_width, 0.800 + title_height),  # upper-left
-        (0.985 - title_width, 0.800, 0.985, 0.800 + title_height),  # upper-right
-    ]
-
-    chosen = choose_free_box(
-        ax=ax,
-        gdf=gdf,
-        candidate_boxes=candidate_boxes,
-        occupied_boxes=occupied_boxes,
-        buffer_ratio=0.018
-    )
-
-    x0, y0, x1, y1 = chosen
-
-    ax.text(
-        x0,
-        y1,
-        title,
-        transform=ax.transAxes,
-        fontsize=fontsize,
-        ha="left",
-        va="top",
-        zorder=100,
-        bbox=dict(
-            boxstyle="round,pad=0.18",
-            facecolor="white",
-            edgecolor="none",
-            alpha=0.85
-        )
-    )
-
-    occupied_boxes.append(chosen)
-
-    return occupied_boxes
-
-
-def add_smart_north_arrow(ax, gdf, occupied_boxes=None, fontsize=10):
-    """
-    Add north arrow / compass in an empty area.
-    No pointed arrow is used.
-    """
-    if occupied_boxes is None:
-        occupied_boxes = []
-
-    w = 0.15
-    h = 0.18
-
-    candidate_boxes = [
-        (0.805, 0.740, 0.805 + w, 0.740 + h),  # upper-right
-        (0.045, 0.740, 0.045 + w, 0.740 + h),  # upper-left
-        (0.805, 0.520, 0.805 + w, 0.520 + h),  # mid-right
-        (0.045, 0.520, 0.045 + w, 0.520 + h),  # mid-left
-        (0.805, 0.300, 0.805 + w, 0.300 + h),  # lower-right
-        (0.045, 0.300, 0.045 + w, 0.300 + h),  # lower-left
+        (0.035, 0.885, 0.035 + title_width, 0.885 + title_height),
+        (0.300, 0.885, 0.300 + title_width, 0.885 + title_height),
+        (0.975 - title_width, 0.885, 0.975, 0.885 + title_height),
+        (0.035, 0.785, 0.035 + title_width, 0.785 + title_height),
+        (0.975 - title_width, 0.785, 0.975, 0.785 + title_height),
+        (0.035, 0.680, 0.035 + title_width, 0.680 + title_height),
     ]
 
     chosen = choose_free_box(
@@ -1077,29 +678,119 @@ def add_smart_north_arrow(ax, gdf, occupied_boxes=None, fontsize=10):
 
     x0, y0, x1, y1 = chosen
 
+    ax.text(
+        x0,
+        y1,
+        title,
+        transform=ax.transAxes,
+        fontsize=fontsize,
+        ha="left",
+        va="top",
+        zorder=150,
+        bbox=dict(
+            boxstyle="round,pad=0.18",
+            facecolor="white",
+            edgecolor="none",
+            alpha=0.88
+        )
+    )
+
+    occupied_boxes.append(chosen)
+
+    return occupied_boxes
+
+
+def add_smart_north_arrow(ax, gdf, occupied_boxes=None, fontsize=10):
+    if occupied_boxes is None:
+        occupied_boxes = []
+
+    w = 0.15
+    h = 0.18
+
+    candidate_boxes = [
+        (0.805, 0.740, 0.805 + w, 0.740 + h),
+        (0.045, 0.740, 0.045 + w, 0.740 + h),
+        (0.805, 0.520, 0.805 + w, 0.520 + h),
+        (0.045, 0.520, 0.045 + w, 0.520 + h),
+        (0.805, 0.300, 0.805 + w, 0.300 + h),
+        (0.045, 0.300, 0.045 + w, 0.300 + h),
+    ]
+
+    chosen = choose_free_box(
+        ax=ax,
+        gdf=gdf,
+        candidate_boxes=candidate_boxes,
+        occupied_boxes=occupied_boxes,
+        buffer_ratio=0.022
+    )
+
+    x0, y0, x1, y1 = chosen
+
     x = (x0 + x1) / 2
     y = (y0 + y1) / 2
 
-    ax.text(x, y + 0.060, "N", transform=ax.transAxes,
-            ha="center", va="center", fontsize=fontsize,
-            fontweight="bold", zorder=100)
+    ax.text(
+        x,
+        y + 0.060,
+        "N",
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=fontsize,
+        fontweight="bold",
+        zorder=150
+    )
 
-    ax.text(x, y - 0.060, "S", transform=ax.transAxes,
-            ha="center", va="center", fontsize=fontsize - 2, zorder=100)
+    ax.text(
+        x,
+        y - 0.060,
+        "S",
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=fontsize - 2,
+        zorder=150
+    )
 
-    ax.text(x - 0.060, y, "W", transform=ax.transAxes,
-            ha="center", va="center", fontsize=fontsize - 2, zorder=100)
+    ax.text(
+        x - 0.060,
+        y,
+        "W",
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=fontsize - 2,
+        zorder=150
+    )
 
-    ax.text(x + 0.060, y, "E", transform=ax.transAxes,
-            ha="center", va="center", fontsize=fontsize - 2, zorder=100)
+    ax.text(
+        x + 0.060,
+        y,
+        "E",
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=fontsize - 2,
+        zorder=150
+    )
 
-    ax.plot([x, x], [y - 0.040, y + 0.040],
-            transform=ax.transAxes, color="black",
-            linewidth=1.1, zorder=99)
+    ax.plot(
+        [x, x],
+        [y - 0.040, y + 0.040],
+        transform=ax.transAxes,
+        color="black",
+        linewidth=1.1,
+        zorder=149
+    )
 
-    ax.plot([x - 0.040, x + 0.040], [y, y],
-            transform=ax.transAxes, color="black",
-            linewidth=1.1, zorder=99)
+    ax.plot(
+        [x - 0.040, x + 0.040],
+        [y, y],
+        transform=ax.transAxes,
+        color="black",
+        linewidth=1.1,
+        zorder=149
+    )
 
     occupied_boxes.append(chosen)
 
@@ -1107,9 +798,6 @@ def add_smart_north_arrow(ax, gdf, occupied_boxes=None, fontsize=10):
 
 
 def choose_nice_scale_length_with_limit(max_length_km):
-    """
-    Choose scale length not exceeding available empty-space width.
-    """
     nice_values = [
         1, 2, 5,
         10, 20, 25, 50, 75,
@@ -1126,9 +814,6 @@ def choose_nice_scale_length_with_limit(max_length_km):
 
 
 def add_smart_scale_bar(ax, gdf, occupied_boxes=None, segments=4, fontsize=7):
-    """
-    Add scale bar in an empty area, avoiding polygon overlap.
-    """
     if occupied_boxes is None:
         occupied_boxes = []
 
@@ -1136,11 +821,12 @@ def add_smart_scale_bar(ax, gdf, occupied_boxes=None, segments=4, fontsize=7):
     h = 0.12
 
     candidate_boxes = [
-        (0.055, 0.045, 0.055 + w, 0.045 + h),  # bottom-left
-        (0.300, 0.045, 0.300 + w, 0.045 + h),  # bottom-centre
-        (0.540, 0.045, 0.540 + w, 0.045 + h),  # bottom-right
-        (0.055, 0.160, 0.055 + w, 0.160 + h),  # lower-left
-        (0.540, 0.160, 0.540 + w, 0.160 + h),  # lower-right
+        (0.055, 0.045, 0.055 + w, 0.045 + h),
+        (0.300, 0.045, 0.300 + w, 0.045 + h),
+        (0.540, 0.045, 0.540 + w, 0.045 + h),
+        (0.055, 0.170, 0.055 + w, 0.170 + h),
+        (0.540, 0.170, 0.540 + w, 0.170 + h),
+        (0.300, 0.170, 0.300 + w, 0.170 + h),
     ]
 
     chosen = choose_free_box(
@@ -1148,7 +834,7 @@ def add_smart_scale_bar(ax, gdf, occupied_boxes=None, segments=4, fontsize=7):
         gdf=gdf,
         candidate_boxes=candidate_boxes,
         occupied_boxes=occupied_boxes,
-        buffer_ratio=0.018
+        buffer_ratio=0.020
     )
 
     x0a, y0a, x1a, y1a = chosen
@@ -1160,7 +846,6 @@ def add_smart_scale_bar(ax, gdf, occupied_boxes=None, segments=4, fontsize=7):
     height_deg = ylim[1] - ylim[0]
 
     center_lat = (ylim[0] + ylim[1]) / 2
-
     width_km = abs(width_deg * 111.32 * np.cos(np.deg2rad(center_lat)))
 
     max_bar_width_axes = (x1a - x0a) * 0.72
@@ -1191,7 +876,7 @@ def add_smart_scale_bar(ax, gdf, occupied_boxes=None, segments=4, fontsize=7):
             facecolor=face,
             edgecolor="black",
             linewidth=0.5,
-            zorder=100
+            zorder=150
         )
 
         ax.add_patch(rect)
@@ -1203,7 +888,7 @@ def add_smart_scale_bar(ax, gdf, occupied_boxes=None, segments=4, fontsize=7):
         ha="center",
         va="bottom",
         fontsize=fontsize,
-        zorder=101
+        zorder=151
     )
 
     ax.text(
@@ -1213,7 +898,7 @@ def add_smart_scale_bar(ax, gdf, occupied_boxes=None, segments=4, fontsize=7):
         ha="center",
         va="bottom",
         fontsize=fontsize,
-        zorder=101
+        zorder=151
     )
 
     ax.text(
@@ -1223,7 +908,7 @@ def add_smart_scale_bar(ax, gdf, occupied_boxes=None, segments=4, fontsize=7):
         ha="center",
         va="top",
         fontsize=fontsize,
-        zorder=101
+        zorder=151
     )
 
     occupied_boxes.append(chosen)
@@ -1232,23 +917,20 @@ def add_smart_scale_bar(ax, gdf, occupied_boxes=None, segments=4, fontsize=7):
 
 
 def add_smart_dem_legend(fig, ax, im, vmin, vmax, gdf, occupied_boxes=None):
-    """
-    Add DEM colorbar in an empty place.
-    Avoids overlap with polygon, north arrow, title, and scale bar.
-    """
     if occupied_boxes is None:
         occupied_boxes = []
 
-    w = 0.20
-    h = 0.30
+    w = 0.22
+    h = 0.34
 
     candidate_boxes = [
-        (0.760, 0.390, 0.760 + w, 0.390 + h),  # mid-right
-        (0.760, 0.610, 0.760 + w, 0.610 + h),  # upper-right
-        (0.060, 0.390, 0.060 + w, 0.390 + h),  # mid-left
-        (0.060, 0.610, 0.060 + w, 0.610 + h),  # upper-left
-        (0.760, 0.120, 0.760 + w, 0.120 + h),  # lower-right
-        (0.060, 0.120, 0.060 + w, 0.120 + h),  # lower-left
+        (0.740, 0.390, 0.740 + w, 0.390 + h),
+        (0.740, 0.580, 0.740 + w, 0.580 + h),
+        (0.060, 0.390, 0.060 + w, 0.390 + h),
+        (0.060, 0.580, 0.060 + w, 0.580 + h),
+        (0.740, 0.130, 0.740 + w, 0.130 + h),
+        (0.060, 0.130, 0.060 + w, 0.130 + h),
+        (0.390, 0.130, 0.390 + w, 0.130 + h),
     ]
 
     chosen = choose_free_box(
@@ -1256,17 +938,16 @@ def add_smart_dem_legend(fig, ax, im, vmin, vmax, gdf, occupied_boxes=None):
         gdf=gdf,
         candidate_boxes=candidate_boxes,
         occupied_boxes=occupied_boxes,
-        buffer_ratio=0.020
+        buffer_ratio=0.022
     )
 
     x0, y0, x1, y1 = chosen
 
-    # Put the color strip inside the selected free box.
     cax = ax.inset_axes([
-        x0 + 0.025,
-        y0 + 0.060,
+        x0 + 0.030,
+        y0 + 0.070,
         0.050,
-        max(0.12, (y1 - y0) - 0.110)
+        max(0.14, (y1 - y0) - 0.125)
     ])
 
     cbar = fig.colorbar(im, cax=cax)
@@ -1289,14 +970,13 @@ def add_smart_dem_legend(fig, ax, im, vmin, vmax, gdf, occupied_boxes=None):
     occupied_boxes.append(chosen)
 
     return occupied_boxes
+
+
 # ============================================================
 # Raster helper functions
 # ============================================================
 
 def clip_dem_to_study_area_wgs84(raster_path, study_gdf_wgs84):
-    """
-    Reproject DEM to EPSG:4326 and clip to study area.
-    """
     with rasterio.open(raster_path) as src:
         if src.crs is None:
             raise ValueError("Uploaded raster has no CRS. Please upload a georeferenced GeoTIFF.")
@@ -1337,9 +1017,6 @@ def clip_dem_to_study_area_wgs84(raster_path, study_gdf_wgs84):
 
 
 def plot_dem(ax, raster_path, study_gdf_wgs84, cmap="plasma"):
-    """
-    Plot clipped DEM.
-    """
     arr, extent = clip_dem_to_study_area_wgs84(
         raster_path,
         study_gdf_wgs84
@@ -1358,30 +1035,6 @@ def plot_dem(ax, raster_path, study_gdf_wgs84, cmap="plasma"):
     )
 
     return im, vmin, vmax
-
-
-def add_dem_legend(fig, ax, im, vmin, vmax):
-    """
-    Add DEM legend.
-    """
-    cax = ax.inset_axes([0.70, 0.31, 0.055, 0.20])
-
-    cbar = fig.colorbar(im, cax=cax)
-
-    cbar.set_ticks([vmax, vmin])
-    cbar.set_ticklabels([
-        f"High : {int(round(vmax))}",
-        f"Low : {int(round(vmin))}"
-    ])
-
-    cbar.ax.tick_params(labelsize=8)
-
-    cax.set_title(
-        "DEM",
-        fontsize=10,
-        fontweight="bold",
-        pad=5
-    )
 
 
 # ============================================================
@@ -1534,17 +1187,6 @@ main_title = st.sidebar.text_input(
     value="Study Area"
 )
 
-title_mode = st.sidebar.selectbox(
-    "Title placement",
-    [
-        "Auto safe",
-        "Always outside",
-        "Inside top-left with white box"
-    ],
-    index=0,
-    help="Auto safe checks title overlap with polygon area. If overlap is detected, title is moved above the map frame."
-)
-
 
 st.sidebar.header("4. Map Style")
 
@@ -1603,6 +1245,32 @@ show_main_legend_without_dem = st.sidebar.checkbox(
 show_connecting_lines = st.sidebar.checkbox(
     "Show connecting lines",
     value=True
+)
+
+st.sidebar.header("5. Empty-Space Control")
+
+india_padding = st.sidebar.slider(
+    "India panel padding",
+    min_value=0.04,
+    max_value=0.25,
+    value=0.10,
+    step=0.01
+)
+
+state_padding = st.sidebar.slider(
+    "State panel padding",
+    min_value=0.05,
+    max_value=0.30,
+    value=0.16,
+    step=0.01
+)
+
+main_padding = st.sidebar.slider(
+    "Main map padding",
+    min_value=0.05,
+    max_value=0.30,
+    value=0.15,
+    step=0.01
 )
 
 
@@ -1719,8 +1387,7 @@ if study_selected_gdf.empty:
 
 fig = plt.figure(figsize=(13, 8), dpi=output_dpi)
 
-# Compact layout with reduced gap between inset panels and main map.
-# Format: [left, bottom, width, height]
+# Compact layout: reduced gap between inset panels and main map.
 ax_india = fig.add_axes([0.040, 0.555, 0.350, 0.365])
 ax_state = fig.add_axes([0.040, 0.085, 0.350, 0.365])
 ax_main = fig.add_axes([0.400, 0.085, 0.560, 0.835])
@@ -1747,8 +1414,8 @@ if india_panel_mode == "Complete India with selected state highlighted":
         zorder=3
     )
 
-    set_extent(ax_india, states_gdf, pad=0.04)
-    title_check_gdf_india = states_gdf
+    set_extent(ax_india, states_gdf, pad=india_padding)
+    furniture_gdf_india = states_gdf
 
 else:
     selected_state_gdf.plot(
@@ -1759,19 +1426,34 @@ else:
         zorder=3
     )
 
-    set_extent(ax_india, states_gdf, pad=0.10)
-    title_check_gdf_india = selected_state_gdf
+    set_extent(ax_india, selected_state_gdf, pad=india_padding)
+    furniture_gdf_india = selected_state_gdf
 
-add_safe_panel_title(
-    ax_india,
-    country_title,
-    gdf_for_check=title_check_gdf_india,
-    fontsize=12,
-    mode=title_mode
+
+occupied_india = []
+
+occupied_india = add_smart_title(
+    ax=ax_india,
+    title=country_title,
+    gdf=furniture_gdf_india,
+    occupied_boxes=occupied_india,
+    fontsize=12
 )
 
-add_north_arrow(ax_india, x=0.88, y=0.78, fontsize=10)
-add_scale_bar_degree(ax_india, location=(0.08, 0.06), fontsize=7)
+occupied_india = add_smart_north_arrow(
+    ax=ax_india,
+    gdf=furniture_gdf_india,
+    occupied_boxes=occupied_india,
+    fontsize=10
+)
+
+occupied_india = add_smart_scale_bar(
+    ax=ax_india,
+    gdf=furniture_gdf_india,
+    occupied_boxes=occupied_india,
+    fontsize=7
+)
+
 apply_degree_grid(ax_india, fontsize=7, xbins=4, ybins=4)
 add_map_border(ax_india)
 
@@ -1814,8 +1496,8 @@ if state_panel_mode == "Complete selected state with district boundaries":
         zorder=4
     )
 
-    set_extent(ax_state, selected_state_gdf, pad=0.16)
-    title_check_gdf_state = selected_state_gdf
+    set_extent(ax_state, selected_state_gdf, pad=state_padding)
+    furniture_gdf_state = selected_state_gdf
 
 elif state_panel_mode == "Selected district only" and selected_district_gdf is not None and not selected_district_gdf.empty:
     selected_district_gdf.plot(
@@ -1835,8 +1517,8 @@ elif state_panel_mode == "Selected district only" and selected_district_gdf is n
         zorder=3
     )
 
-    set_extent(ax_state, selected_district_gdf, pad=0.14)
-    title_check_gdf_state = selected_district_gdf
+    set_extent(ax_state, selected_district_gdf, pad=state_padding)
+    furniture_gdf_state = selected_district_gdf
 
 else:
     selected_state_gdf.plot(
@@ -1856,19 +1538,34 @@ else:
         zorder=3
     )
 
-    set_extent(ax_state, selected_state_gdf, pad=0.08)
-    title_check_gdf_state = selected_state_gdf
+    set_extent(ax_state, selected_state_gdf, pad=state_padding)
+    furniture_gdf_state = selected_state_gdf
 
-add_safe_panel_title(
-    ax_state,
-    state_title,
-    gdf_for_check=title_check_gdf_state,
-    fontsize=12,
-    mode=title_mode
+
+occupied_state = []
+
+occupied_state = add_smart_title(
+    ax=ax_state,
+    title=state_title,
+    gdf=furniture_gdf_state,
+    occupied_boxes=occupied_state,
+    fontsize=12
 )
 
-add_north_arrow(ax_state, x=0.88, y=0.78, fontsize=10)
-add_scale_bar_degree(ax_state, location=(0.08, 0.06), fontsize=7)
+occupied_state = add_smart_north_arrow(
+    ax=ax_state,
+    gdf=furniture_gdf_state,
+    occupied_boxes=occupied_state,
+    fontsize=10
+)
+
+occupied_state = add_smart_scale_bar(
+    ax=ax_state,
+    gdf=furniture_gdf_state,
+    occupied_boxes=occupied_state,
+    fontsize=7
+)
+
 apply_degree_grid(ax_state, fontsize=7, xbins=4, ybins=4)
 add_map_border(ax_state)
 
@@ -1878,6 +1575,9 @@ add_map_border(ax_state)
 # ============================================================
 
 dem_plotted = False
+im = None
+dem_min = None
+dem_max = None
 
 if show_main_district_background:
     try:
@@ -1905,14 +1605,6 @@ if dem_path is not None:
             color=study_boundary_color,
             linewidth=0.8,
             zorder=5
-        )
-
-        add_dem_legend(
-            fig=fig,
-            ax=ax_main,
-            im=im,
-            vmin=dem_min,
-            vmax=dem_max
         )
 
         dem_plotted = True
@@ -1945,18 +1637,43 @@ if not dem_plotted:
             framealpha=0.95
         )
 
-set_extent(ax_main, study_selected_gdf, pad=0.08)
+set_extent(ax_main, study_selected_gdf, pad=main_padding)
 
-add_safe_panel_title(
-    ax_main,
-    main_title,
-    gdf_for_check=study_selected_gdf,
-    fontsize=12,
-    mode=title_mode
+occupied_main = []
+
+occupied_main = add_smart_title(
+    ax=ax_main,
+    title=main_title,
+    gdf=study_selected_gdf,
+    occupied_boxes=occupied_main,
+    fontsize=12
 )
 
-add_north_arrow(ax_main, x=0.90, y=0.82, fontsize=11)
-add_scale_bar_degree(ax_main, location=(0.08, 0.055), fontsize=7)
+occupied_main = add_smart_north_arrow(
+    ax=ax_main,
+    gdf=study_selected_gdf,
+    occupied_boxes=occupied_main,
+    fontsize=11
+)
+
+occupied_main = add_smart_scale_bar(
+    ax=ax_main,
+    gdf=study_selected_gdf,
+    occupied_boxes=occupied_main,
+    fontsize=7
+)
+
+if dem_plotted:
+    occupied_main = add_smart_dem_legend(
+        fig=fig,
+        ax=ax_main,
+        im=im,
+        vmin=dem_min,
+        vmax=dem_max,
+        gdf=study_selected_gdf,
+        occupied_boxes=occupied_main
+    )
+
 apply_degree_grid(ax_main, fontsize=8, xbins=4, ybins=7)
 add_map_border(ax_main)
 
@@ -2016,7 +1733,6 @@ pdf_buffer = io.BytesIO()
 fig.savefig(
     pdf_buffer,
     format="pdf",
-    dpi=output_dpi,
     bbox_inches="tight",
     facecolor="white"
 )
