@@ -358,6 +358,10 @@ def add_title(ax, title, loc="upper_left", fontsize=12):
 
 
 def add_compass(ax, loc="upper_right", fontsize=10):
+    """
+    Add a simple north arrow.
+    The function name is kept as add_compass so the rest of the app remains compatible.
+    """
     positions = {
         "upper_right": (0.88, 0.78),
         "upper_left": (0.14, 0.78),
@@ -365,12 +369,34 @@ def add_compass(ax, loc="upper_right", fontsize=10):
         "lower_left": (0.14, 0.25),
     }
     x, y = positions.get(loc, positions["upper_right"])
-    ax.text(x, y + 0.060, "N", transform=ax.transAxes, ha="center", va="center", fontsize=fontsize, fontweight="bold", zorder=100)
-    ax.text(x, y - 0.060, "S", transform=ax.transAxes, ha="center", va="center", fontsize=fontsize - 2, zorder=100)
-    ax.text(x - 0.060, y, "W", transform=ax.transAxes, ha="center", va="center", fontsize=fontsize - 2, zorder=100)
-    ax.text(x + 0.060, y, "E", transform=ax.transAxes, ha="center", va="center", fontsize=fontsize - 2, zorder=100)
-    ax.plot([x, x], [y - 0.040, y + 0.040], transform=ax.transAxes, color="black", linewidth=1.0, zorder=99)
-    ax.plot([x - 0.040, x + 0.040], [y, y], transform=ax.transAxes, color="black", linewidth=1.0, zorder=99)
+
+    # North label
+    ax.text(
+        x, y + 0.115, "N",
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=fontsize + 1,
+        fontweight="bold",
+        zorder=120
+    )
+
+    # Arrow body
+    ax.annotate(
+        "",
+        xy=(x, y + 0.085),
+        xytext=(x, y - 0.075),
+        xycoords=ax.transAxes,
+        arrowprops=dict(
+            arrowstyle="-|>",
+            lw=1.8,
+            color="black",
+            mutation_scale=18,
+            shrinkA=0,
+            shrinkB=0
+        ),
+        zorder=119
+    )
 
 
 def choose_nice_scale(width_km):
@@ -537,9 +563,9 @@ india_title_loc = st.sidebar.selectbox("India title position", ["upper_left", "u
 state_title_loc = st.sidebar.selectbox("State title position", ["upper_left", "upper_right", "lower_left", "lower_right", "top_center"], index=0)
 main_title_loc = st.sidebar.selectbox("Main title position", ["upper_left", "upper_right", "lower_left", "lower_right", "top_center"], index=0)
 
-india_compass_loc = st.sidebar.selectbox("India compass position", ["upper_right", "upper_left", "lower_right", "lower_left"], index=0)
-state_compass_loc = st.sidebar.selectbox("State compass position", ["upper_right", "upper_left", "lower_right", "lower_left"], index=0)
-main_compass_loc = st.sidebar.selectbox("Main compass position", ["upper_right", "upper_left", "lower_right", "lower_left"], index=0)
+india_compass_loc = st.sidebar.selectbox("India north arrow position", ["upper_right", "upper_left", "lower_right", "lower_left"], index=0)
+state_compass_loc = st.sidebar.selectbox("State north arrow position", ["upper_right", "upper_left", "lower_right", "lower_left"], index=0)
+main_compass_loc = st.sidebar.selectbox("Main north arrow position", ["upper_right", "upper_left", "lower_right", "lower_left"], index=0)
 
 main_legend_loc = st.sidebar.selectbox("DEM legend position", ["middle_right", "upper_right", "lower_right", "middle_left"], index=0)
 
@@ -628,10 +654,11 @@ if study_selected_gdf.empty:
 try:
     fig = plt.figure(figsize=(13, 8), dpi=output_dpi)
 
-    # Compact layout. No extent indicator / connector lines.
-    ax_india = fig.add_axes([0.040, 0.555, 0.350, 0.365])
-    ax_state = fig.add_axes([0.040, 0.085, 0.350, 0.365])
-    ax_main = fig.add_axes([0.400, 0.085, 0.560, 0.835])
+    # More compact layout. No extent indicator / connector lines.
+    # Values are [left, bottom, width, height] in figure-fraction units.
+    ax_india = fig.add_axes([0.035, 0.525, 0.365, 0.415])
+    ax_state = fig.add_axes([0.035, 0.065, 0.365, 0.415])
+    ax_main = fig.add_axes([0.405, 0.065, 0.565, 0.875])
 
     # India panel
     if india_panel_mode == "Complete India with selected state":
